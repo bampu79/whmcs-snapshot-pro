@@ -1,0 +1,265 @@
+/*
+ * WHMCS Snapshot Pro - Stylesheet
+ *
+ * Styling for the addon's admin UI. Complements the Bootstrap 4 classes that
+ * WHMCS ships, adding module-specific cards, wizard steps and progress views.
+ */
+
+.snapshot-pro {
+    margin-top: 10px;
+    font-size: 14px;
+}
+
+.snapshot-pro .sp-nav {
+    margin-bottom: 20px;
+}
+
+.snapshot-pro .sp-page-title {
+    font-weight: 600;
+    margin: 10px 0 20px;
+    color: #2c3e50;
+}
+
+.snapshot-pro .sp-section-title {
+    margin: 25px 0 12px;
+    font-weight: 600;
+    color: #34495e;
+}
+
+.snapshot-pro .sp-mt {
+    margin-top: 12px;
+}
+
+/* ---- Dashboard summary cards ---- */
+.snapshot-pro .sp-cards {
+    margin-bottom: 20px;
+}
+
+.snapshot-pro .sp-card {
+    border-radius: 8px;
+    padding: 18px 20px;
+    color: #fff;
+    margin-bottom: 15px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+    min-height: 96px;
+}
+
+.snapshot-pro .sp-card-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0.9;
+}
+
+.snapshot-pro .sp-card-value {
+    font-size: 22px;
+    font-weight: 700;
+    margin-top: 6px;
+    word-break: break-word;
+}
+
+.snapshot-pro .sp-card-value.sp-small {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.snapshot-pro .sp-card-blue   { background: linear-gradient(135deg, #2980b9, #3498db); }
+.snapshot-pro .sp-card-green  { background: linear-gradient(135deg, #27ae60, #2ecc71); }
+.snapshot-pro .sp-card-purple { background: linear-gradient(135deg, #8e44ad, #9b59b6); }
+.snapshot-pro .sp-card-orange { background: linear-gradient(135deg, #d35400, #e67e22); }
+
+.snapshot-pro .sp-actions-bar {
+    margin: 10px 0 20px;
+}
+
+.snapshot-pro .sp-actions-bar .btn {
+    margin-right: 8px;
+}
+
+/* ---- Tables ---- */
+.snapshot-pro .sp-table code {
+    font-size: 12px;
+}
+
+.snapshot-pro .sp-logs td {
+    vertical-align: middle;
+}
+
+.snapshot-pro .sp-nowrap {
+    white-space: nowrap;
+}
+
+/* ---- Create backup ---- */
+.snapshot-pro .sp-scope-list {
+    list-style: none;
+    padding-left: 0;
+    margin-bottom: 20px;
+}
+
+.snapshot-pro .sp-scope-list li {
+    padding: 4px 0;
+    border-bottom: 1px dashed #eee;
+}
+
+.snapshot-pro .sp-backup-panel {
+    background: #f8f9fa;
+    border: 1px solid #e3e6ea;
+    border-radius: 8px;
+    padding: 24px;
+}
+
+.snapshot-pro .sp-progress-wrap {
+    margin-top: 20px;
+}
+
+.snapshot-pro .sp-progress {
+    height: 26px;
+    border-radius: 6px;
+}
+
+.snapshot-pro .sp-progress-msg {
+    margin-top: 8px;
+    font-weight: 600;
+    color: #34495e;
+}
+
+.snapshot-pro .sp-progress-log {
+    margin-top: 12px;
+    max-height: 240px;
+    overflow-y: auto;
+    background: #1e1e1e;
+    color: #dcdcdc;
+    font-family: "Courier New", monospace;
+    font-size: 12px;
+    padding: 12px;
+    border-radius: 6px;
+    white-space: pre-wrap;
+}
+
+.snapshot-pro .sp-result {
+    margin-top: 18px;
+}
+
+/* ---- Restore wizard ---- */
+.snapshot-pro .sp-restore-warning {
+    margin-bottom: 20px;
+}
+
+.snapshot-pro .sp-steps {
+    display: flex;
+    list-style: none;
+    padding: 0;
+    margin: 0 0 25px;
+    counter-reset: step;
+    flex-wrap: wrap;
+}
+
+.snapshot-pro .sp-step {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding: 10px 5px;
+    color: #95a5a6;
+    min-width: 90px;
+}
+
+.snapshot-pro .sp-step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: #ecf0f1;
+    color: #7f8c8d;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.snapshot-pro .sp-step-label {
+    display: block;
+    font-size: 12px;
+}
+
+.snapshot-pro .sp-step-active .sp-step-num {
+    background: #3498db;
+    color: #fff;
+}
+
+.snapshot-pro .sp-step-active {
+    color: #2c3e50;
+    font-weight: 600;
+}
+
+.snapshot-pro .sp-step-done .sp-step-num {
+    background: #27ae60;
+    color: #fff;
+}
+
+.snapshot-pro .sp-wizard-body {
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 8px;
+    padding: 22px;
+}
+
+.snapshot-pro .sp-status-box {
+    background: #f8f9fa;
+    border: 1px solid #e3e6ea;
+    border-radius: 6px;
+    padding: 14px;
+    margin: 12px 0;
+}
+
+.snapshot-pro .sp-nav-buttons {
+    margin-top: 18px;
+}
+
+.snapshot-pro .sp-nav-buttons .btn {
+    margin-right: 8px;
+}
+
+.snapshot-pro .sp-scope-options .sp-radio {
+    display: block;
+    padding: 8px 0;
+}
+
+.snapshot-pro .sp-check {
+    display: block;
+    margin: 12px 0;
+    font-weight: 600;
+}
+
+/* ---- Settings ---- */
+.snapshot-pro .sp-fieldset {
+    border: 1px solid #e3e6ea;
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+}
+
+.snapshot-pro .sp-fieldset legend {
+    width: auto;
+    padding: 0 10px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+.snapshot-pro .sp-json {
+    font-family: "Courier New", monospace;
+    font-size: 12px;
+}
+
+.snapshot-pro .sp-inline-result {
+    margin-left: 10px;
+    font-weight: 600;
+}
+
+.snapshot-pro .sp-form-actions {
+    margin-top: 10px;
+}
+
+/* ---- Status colours ---- */
+.snapshot-pro .sp-ok { color: #27ae60; }
+.snapshot-pro .sp-fail { color: #c0392b; }
