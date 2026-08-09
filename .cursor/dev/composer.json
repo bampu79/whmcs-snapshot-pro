@@ -1,0 +1,11 @@
+{
+  "name": "snapshot-pro/dev-harness",
+  "description": "Development-only dependencies for Cloud Agent verification (not used by the WHMCS addon).",
+  "require": {
+    "php": ">=8.0",
+    "illuminate/database": "^10.0"
+  },
+  "config": {
+    "sort-packages": true
+  }
+}

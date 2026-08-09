@@ -1,0 +1,17 @@
+{
+  "name": "WHMCS Snapshot Pro",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "user": "ubuntu",
+  "install": "./.cursor/install.sh",
+  "start": "./.cursor/start.sh",
+  "terminals": [
+    {
+      "name": "whmcs-stack",
+      "command": "cd /workspace/.cursor/dev && docker compose up"
+    }
+  ],
+  "ports": [8080, 8025]
+}
