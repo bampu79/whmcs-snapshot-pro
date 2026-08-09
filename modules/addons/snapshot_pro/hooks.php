@@ -2,9 +2,9 @@
 /**
  * WHMCS Snapshot Pro - Hooks
  *
- * Registers the DailyCronJob hook so scheduled snapshots run automatically as
- * part of the WHMCS daily cron. The hook honours the configured schedule
- * (daily/weekly/monthly) and applies the retention policy after each run.
+ * Registers DailyCronJob to enqueue a scheduled snapshot when due. Long-running
+ * SnapshotManager::create() work is never executed inside WHMCS automation cron;
+ * the dedicated CLI worker (cron.php) claims and processes queued jobs.
  *
  * WHMCS automatically includes this file for active addon modules.
  *
@@ -14,7 +14,7 @@
  */
 
 use WHMCS\Database\Capsule;
-use SnapshotPro\SnapshotManager;
+use SnapshotPro\JobQueue;
 use SnapshotPro\Settings;
 use SnapshotPro\Logger;
 
@@ -25,10 +25,14 @@ if (!defined('WHMCS')) {
 require_once __DIR__ . '/autoload.php';
 
 /**
- * DailyCronJob hook: run a scheduled snapshot when due.
+ * DailyCronJob hook: enqueue a scheduled snapshot when due.
  *
- * WHMCS fires DailyCronJob once per day. We decide whether a backup is due for
- * the configured schedule, and if so, create a snapshot and prune old ones.
+ * WHMCS fires DailyCronJob once per day. When a backup is due for the
+ * configured schedule, a job is queued for the dedicated Snapshot Pro CLI
+ * worker. This hook must remain fast and must never call SnapshotManager.
+ *
+ * Duplicate scheduled jobs are prevented by JobQueue::enqueueScheduled()
+ * (unique schedule_slot), not only by a SELECT-then-INSERT check.
  *
  * @return void
  */
@@ -49,21 +53,42 @@ add_hook('DailyCronJob', 1, function ($vars) {
             return;
         }
 
-        Logger::info('cron.run', 'Daily cron triggered a scheduled snapshot (' . $schedule . ').', 'cron');
+        JobQueue::ensureSchema();
 
-        $manager = new SnapshotManager();
-        $manager->create('cron', 'cron');
-        // Retention is applied inside create(), but we call it defensively too.
-        $manager->applyRetention('cron');
+        // Fast path: skip INSERT when an active cron job is already visible.
+        if (JobQueue::hasActiveJob('cron')) {
+            Logger::info(
+                'cron.skip',
+                'Scheduled backup due but a cron job is already queued or running.',
+                'cron'
+            );
+            return;
+        }
 
-        // Prune very old audit logs to keep the table lean.
+        // Atomic uniqueness via schedule_slot; returns null on duplicate-key race.
+        $jobId = JobQueue::enqueueScheduled();
+        if ($jobId === null) {
+            return;
+        }
+
+        Logger::info(
+            'cron.enqueue',
+            'Scheduled snapshot queued for CLI worker (schedule: ' . $schedule . ', job: ' . $jobId . ').',
+            'cron'
+        );
+
+        // Lightweight housekeeping only — never run SnapshotManager here.
         Logger::prune(90);
     } catch (\Throwable $e) {
         // Never let a backup failure break the WHMCS cron chain.
         try {
-            Logger::error('cron.run', 'Scheduled snapshot failed: ' . $e->getMessage(), 'cron');
+            Logger::error(
+                'cron.enqueue',
+                'Failed to enqueue scheduled snapshot: ' . JobQueue::sanitizeErrorMessage($e->getMessage()),
+                'cron'
+            );
         } catch (\Throwable $inner) {
-            error_log('SnapshotPro cron hook fatal: ' . $e->getMessage());
+            error_log('SnapshotPro cron hook fatal');
         }
     }
 });

@@ -21,6 +21,7 @@
 
 use WHMCS\Database\Capsule;
 use SnapshotPro\SnapshotManager;
+use SnapshotPro\JobQueue;
 use SnapshotPro\RestoreWizard;
 use SnapshotPro\Settings;
 use SnapshotPro\Logger;
@@ -55,7 +56,7 @@ function snapshot_pro_config()
             . 'guided restore wizard with integrity verification.',
         'author'  => 'bampu79',
         'language' => 'english',
-        'version' => '1.0.0',
+        'version' => '1.1.0',
         'fields'  => [
             // A minimal WHMCS-level toggle. The bulk of configuration lives on
             // the module's own Settings page so it can hold large JSON blobs.
@@ -132,6 +133,9 @@ function snapshot_pro_activate()
             });
         }
 
+        // Background job queue (claimed by the dedicated CLI worker cron.php).
+        JobQueue::ensureSchema();
+
         // Seed default settings (only fills gaps; never overwrites existing).
         foreach (Settings::defaults() as $key => $value) {
             if (!Capsule::table('mod_snapshot_pro_settings')->where('setting_key', $key)->exists()) {
@@ -185,6 +189,7 @@ function snapshot_pro_deactivate()
 {
     try {
         $schema = Capsule::schema();
+        $schema->dropIfExists('mod_snapshot_pro_jobs');
         $schema->dropIfExists('mod_snapshot_pro_logs');
         $schema->dropIfExists('mod_snapshot_pro_settings');
         $schema->dropIfExists('mod_snapshot_pro_snapshots');
@@ -203,6 +208,32 @@ function snapshot_pro_deactivate()
 }
 
 /**
+ * Upgrade the module schema when the configured version changes.
+ *
+ * WHMCS invokes this when snapshot_pro_config() reports a newer version than
+ * the one stored for the addon. Creates the jobs table for the CLI worker queue.
+ *
+ * @param array $vars WHMCS module variables (includes 'version').
+ * @return array ['status' => 'success'|'error', 'description' => string]
+ */
+function snapshot_pro_upgrade($vars)
+{
+    try {
+        JobQueue::ensureSchema();
+        return [
+            'status'      => 'success',
+            'description' => 'WHMCS Snapshot Pro upgraded to ' . ($vars['version'] ?? '1.1.0')
+                . '. Background job queue table is ready.',
+        ];
+    } catch (\Exception $e) {
+        return [
+            'status'      => 'error',
+            'description' => 'Upgrade failed: ' . $e->getMessage(),
+        ];
+    }
+}
+
+/**
  * Render the admin area output.
  *
  * Dispatches to the requested page (dashboard, create, restore, settings, logs)
@@ -215,6 +246,13 @@ function snapshot_pro_deactivate()
  */
 function snapshot_pro_output($vars)
 {
+    // Ensure schema migrations apply even if WHMCS has not yet run upgrade().
+    try {
+        JobQueue::ensureSchema();
+    } catch (\Exception $e) {
+        // Non-fatal; activation/upgrade remain the primary path.
+    }
+
     $modulelink = $vars['modulelink'];
     $version    = $vars['version'];
 

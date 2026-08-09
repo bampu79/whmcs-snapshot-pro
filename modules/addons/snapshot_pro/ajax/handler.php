@@ -3,15 +3,17 @@
  * WHMCS Snapshot Pro - AJAX Handler
  *
  * Single JSON endpoint powering the asynchronous parts of the module:
- *   - Manual backup creation with progress polling
+ *   - Manual backup creation (enqueue only; processed by the CLI worker)
+ *   - Progress polling for queued/running jobs
  *   - The multi-step restore wizard (verify / safety / confirm / execute)
  *
  * The handler bootstraps the WHMCS environment (so Capsule, sessions and admin
  * authentication are available), enforces Full Administrator access and CSRF
  * validation, then dispatches on the `op` parameter and returns a JSON payload.
  *
- * Long-running operations write progress into a per-job file so the browser can
- * poll `op=progress` while the work continues.
+ * Manual snapshot creation persists a queued job and returns immediately.
+ * Progress is written to a per-job file (and the jobs table) so the browser can
+ * poll `op=progress` while modules/addons/snapshot_pro/cron.php runs SnapshotManager.
  *
  * @package    SnapshotPro
  * @author     bampu79
@@ -20,6 +22,7 @@
 
 use WHMCS\Database\Capsule;
 use SnapshotPro\SnapshotManager;
+use SnapshotPro\JobQueue;
 use SnapshotPro\RestoreWizard;
 use SnapshotPro\Settings;
 use SnapshotPro\Logger;
@@ -54,19 +57,18 @@ function sp_json($data, $httpCode = 200)
 }
 
 /**
- * Path to a job's progress file within the working directory.
+ * Path to a job's progress file (delegates to JobQueue).
  *
  * @param string $jobId
  * @return string
  */
 function sp_progressFile($jobId)
 {
-    $jobId = preg_replace('/[^a-zA-Z0-9_]/', '', $jobId);
-    return sys_get_temp_dir() . '/snapshot_pro_work/progress_' . $jobId . '.json';
+    return JobQueue::progressFile($jobId);
 }
 
 /**
- * Write a progress record for a job.
+ * Write a progress record for a job (delegates to JobQueue).
  *
  * @param string $jobId
  * @param int    $percent
@@ -77,16 +79,7 @@ function sp_progressFile($jobId)
  */
 function sp_writeProgress($jobId, $percent, $message, $state = 'running', array $extra = [])
 {
-    $dir = dirname(sp_progressFile($jobId));
-    if (!is_dir($dir)) {
-        @mkdir($dir, 0700, true);
-    }
-    @file_put_contents(sp_progressFile($jobId), json_encode(array_merge([
-        'percent' => (int) $percent,
-        'message' => (string) $message,
-        'state'   => $state,
-        'ts'      => time(),
-    ], $extra)));
+    JobQueue::writeProgress($jobId, $percent, $message, $state, $extra);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,59 +125,31 @@ if ($op !== 'progress') {
 try {
     switch ($op) {
         // -------------------------------------------------------------------
-        // Poll progress for a running job.
+        // Poll progress for a queued/running job (read-only; never runs backup).
         // -------------------------------------------------------------------
         case 'progress':
             $jobId = isset($_REQUEST['job']) ? $_REQUEST['job'] : '';
             $file  = sp_progressFile($jobId);
-            if (!is_file($file)) {
-                sp_json(['ok' => true, 'percent' => 0, 'message' => 'Waiting…', 'state' => 'running']);
+            if (is_file($file)) {
+                $data = json_decode(file_get_contents($file), true);
+                sp_json(array_merge(['ok' => true], is_array($data) ? $data : []));
             }
-            $data = json_decode(file_get_contents($file), true);
-            sp_json(array_merge(['ok' => true], is_array($data) ? $data : []));
+            // Fall back to the persistent jobs table (e.g. after temp cleanup).
+            $fromDb = JobQueue::progressFromDb($jobId);
+            if ($fromDb) {
+                sp_json(array_merge(['ok' => true], $fromDb));
+            }
+            sp_json(['ok' => true, 'percent' => 0, 'message' => 'Waiting…', 'state' => 'running']);
             break;
 
         // -------------------------------------------------------------------
-        // Create a manual backup. Runs synchronously but streams progress to a
-        // job file (flushed as it goes) so the client polls op=progress.
+        // Queue a manual backup. Returns immediately; SnapshotManager::create()
+        // runs only in the dedicated CLI worker (cron.php) — never in this request.
         // -------------------------------------------------------------------
         case 'create_backup':
-            $jobId = 'job_' . bin2hex(random_bytes(6));
-            // Send the job id immediately, then continue processing.
-            sp_writeProgress($jobId, 1, 'Initializing…');
-
-            // Detach output so the browser has the job id and can start polling.
-            ignore_user_abort(true);
-            @set_time_limit(0);
-
-            // Return the job id first; the actual work continues after flush.
-            if (function_exists('fastcgi_finish_request')) {
-                echo json_encode(['ok' => true, 'job' => $jobId, 'async' => true]);
-                @session_write_close();
-                fastcgi_finish_request();
-            } else {
-                // Without FastCGI we cannot truly background; do the work then
-                // return the final state. The client will still poll and get 'done'.
-                register_shutdown_function(function () use ($jobId) {
-                    // no-op; ensures job file persists.
-                });
-            }
-
-            try {
-                $manager = new SnapshotManager();
-                $manager->create('manual', $adminUser, function ($pct, $msg) use ($jobId) {
-                    sp_writeProgress($jobId, $pct, $msg);
-                });
-                sp_writeProgress($jobId, 100, 'Backup completed successfully.', 'done');
-            } catch (\Exception $e) {
-                sp_writeProgress($jobId, 100, $e->getMessage(), 'error');
-            }
-
-            // If we already flushed via FastCGI, we're done. Otherwise return now.
-            if (!function_exists('fastcgi_finish_request')) {
-                sp_json(['ok' => true, 'job' => $jobId, 'async' => false]);
-            }
-            exit;
+            $jobId = JobQueue::enqueue('manual', $adminUser);
+            sp_json(['ok' => true, 'job' => $jobId, 'async' => true]);
+            break;
 
         // -------------------------------------------------------------------
         // Restore wizard: integrity verification.

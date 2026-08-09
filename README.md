@@ -40,8 +40,9 @@ guided, integrity-verified wizard.
   before any restore begins.
 - **Storage backends**: local server storage and Google Drive (via a service
   account). Selectable globally in settings.
-- **Scheduled automatic backups** (daily / weekly / monthly) via the WHMCS
-  daily cron, with a configurable **retention policy** (keep last *N*).
+- **Scheduled automatic backups** (daily / weekly / monthly) queued by the
+  WHMCS daily cron and executed by the dedicated Snapshot Pro CLI worker, with
+  a configurable **retention policy** (keep last *N*).
 - **Guided restore wizard** — a 7-step, AJAX-driven flow: select → verify →
   safety backup → scope → confirm → execute (live log) → report.
 - **Full audit log** of every backup, restore and settings change.
@@ -157,16 +158,32 @@ Open **Addons → WHMCS Snapshot Pro → Settings** and configure:
 
 1. Go to **Create Backup**.
 2. Review the scope and storage summary.
-3. Click **Start Backup Now**. A live progress bar reports each stage
-   (database → files → bundle → encrypt → checksum → upload).
+3. Click **Start Backup Now**. The request only **queues** a job and returns
+   immediately; a live progress bar polls while the dedicated CLI worker runs
+   each stage (database → files → bundle → encrypt → checksum → upload).
 4. On completion the snapshot appears on the **Dashboard**.
+
+### Snapshot Pro CLI Worker (required)
+
+Long-running snapshot work must **not** run inside the normal WHMCS automation
+cron. Schedule the module worker separately (adjust the PHP binary and WHMCS
+path for your server):
+
+```bash
+*/5 * * * * /usr/bin/php -q /path/to/whmcs/modules/addons/snapshot_pro/cron.php >/dev/null 2>&1
+```
+
+This script is CLI-only. It claims at most one queued job per run and executes
+`SnapshotManager::create()` in that isolated process.
 
 ### Scheduled Backups
 
-Scheduled snapshots run through the **WHMCS daily cron**. Ensure your WHMCS
-cron is configured (System Settings → Automation Settings). The module decides
-whether a backup is due based on your schedule and the last successful backup
-time, so running the cron more than once a day will not create duplicates.
+When a backup is due, the WHMCS **DailyCronJob** hook only **enqueues** a job
+(it never runs the backup pipeline). The Snapshot Pro CLI worker above then
+processes it. Ensure both the WHMCS system cron and the Snapshot Pro worker
+cron are configured. The module decides whether a backup is due based on your
+schedule and the last successful backup time, so the daily hook will not stack
+duplicate scheduled jobs while one is already queued or running.
 
 ### Restoring a Snapshot
 
@@ -232,12 +249,14 @@ stored as the snapshot's storage reference.
 ```
 modules/addons/snapshot_pro/
 ├── snapshot_pro.php          # Addon entry point (config/activate/deactivate/output)
-├── hooks.php                 # DailyCronJob hook for scheduled backups
+├── hooks.php                 # DailyCronJob enqueues scheduled backups only
+├── cron.php                  # Dedicated CLI worker (claims & runs queued jobs)
 ├── autoload.php              # PSR-4 autoloader for SnapshotPro\ namespace
 ├── lang/
 │   └── english.php           # Language strings
 ├── lib/
 │   ├── SnapshotManager.php   # Core orchestration: create/list/delete/retention
+│   ├── JobQueue.php          # Persistent job queue + atomic claim
 │   ├── DatabaseBackup.php    # mysqldump + PHP-fallback DB dump/restore
 │   ├── FilesystemBackup.php  # PharData/ZipArchive file archiving
 │   ├── Encryption.php        # AES-256-CBC encrypt/decrypt (+ HMAC)
