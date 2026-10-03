@@ -13,7 +13,11 @@
 window.SnapshotPro = (function () {
     'use strict';
 
-    var AJAX_URL = 'modules/addons/snapshot_pro/ajax/handler.php';
+    // Set by the module templates from the WHMCS installation base URL
+    // (not the admin directory). See snapshot_pro_output() → $ajaxUrl.
+    var AJAX_URL = (typeof window.SnapshotProAjaxUrl === 'string' && window.SnapshotProAjaxUrl)
+        ? window.SnapshotProAjaxUrl
+        : '';
 
     /**
      * Convert a byte count into a human-readable string.

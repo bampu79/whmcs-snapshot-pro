@@ -183,6 +183,9 @@
     </div>
 </div>
 
+<script>
+    window.SnapshotProAjaxUrl = "{$ajaxUrl|escape:'javascript'}";
+</script>
 <script src="{$assetsBase}/js/snapshot_pro.js"></script>
 <script>
     // Boot the restore wizard state machine.

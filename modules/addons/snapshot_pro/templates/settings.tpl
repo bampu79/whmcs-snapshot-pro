@@ -126,6 +126,9 @@
     </form>
 </div>
 
+<script>
+    window.SnapshotProAjaxUrl = "{$ajaxUrl|escape:'javascript'}";
+</script>
 <script src="{$assetsBase}/js/snapshot_pro.js"></script>
 <script>
     // Wire up the Google Drive test button.

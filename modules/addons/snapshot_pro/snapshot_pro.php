@@ -272,8 +272,16 @@ function snapshot_pro_output($vars)
         $notice = snapshot_pro_handlePost($action, $adminUser);
     }
 
-    // Base asset URLs.
-    $assetsBase = 'modules/addons/snapshot_pro/assets';
+    // Asset/AJAX URLs must be rooted at the WHMCS installation base (System URL),
+    // not the admin directory — admin pages live under /admin (or a custom admin
+    // path), so document-relative "modules/addons/..." paths 404.
+    $whmcsBase = '';
+    if (class_exists('\\WHMCS\\Utility\\Environment\\WebHelper')) {
+        $whmcsBase = (string) \WHMCS\Utility\Environment\WebHelper::getBaseUrl();
+    }
+    $whmcsBase = rtrim($whmcsBase, '/');
+    $assetsBase = $whmcsBase . '/modules/addons/snapshot_pro/assets';
+    $ajaxUrl    = $whmcsBase . '/modules/addons/snapshot_pro/ajax/handler.php';
 
     // Build a Smarty instance using WHMCS' bundled Smarty.
     $smarty = new \Smarty();
@@ -289,6 +297,7 @@ function snapshot_pro_output($vars)
     // Common template variables.
     $smarty->assign('modulelink', $modulelink);
     $smarty->assign('assetsBase', $assetsBase);
+    $smarty->assign('ajaxUrl', $ajaxUrl);
     $smarty->assign('version', $version);
     $smarty->assign('action', $action);
     $smarty->assign('csrfToken', snapshot_pro_csrfToken());
