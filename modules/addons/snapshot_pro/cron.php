@@ -46,6 +46,8 @@ if (!is_readable($bootstrapFile)) {
 
 chdir($whmcsRoot);
 require_once $bootstrapFile;
+@set_time_limit(0);
+@ini_set('memory_limit', '512M');
 require_once __DIR__ . '/autoload.php';
 
 use SnapshotPro\JobQueue;

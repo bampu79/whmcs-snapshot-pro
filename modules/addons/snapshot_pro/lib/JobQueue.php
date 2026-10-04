@@ -471,6 +471,7 @@ class JobQueue
 
         self::writeProgress($jobId, 2, 'Starting snapshot…', 'running', [], $rowId);
         Logger::info('job.run', 'Processing snapshot job: ' . $jobId, $adminUser ?: 'cron');
+        self::registerUnexpectedShutdownHandler($rowId, $jobId);
 
         try {
             @set_time_limit(0);
@@ -584,5 +585,110 @@ class JobQueue
         } finally {
             self::releaseWorkerLock();
         }
+    }
+
+    /**
+     * Register a one-shot shutdown diagnostic for a claimed running job.
+     *
+     * @param int    $rowId
+     * @param string $jobId
+     * @return void
+     */
+    private static function registerUnexpectedShutdownHandler($rowId, $jobId)
+    {
+        static $registered = false;
+        if ($registered) {
+            return;
+        }
+        $registered = true;
+
+        register_shutdown_function(function () use ($rowId, $jobId) {
+            self::handleUnexpectedShutdown((int) $rowId, (string) $jobId);
+        });
+    }
+
+    /**
+     * Persist a shutdown diagnostic only if the claimed job is still running.
+     *
+     * @param int    $rowId
+     * @param string $jobId
+     * @return void
+     */
+    private static function handleUnexpectedShutdown($rowId, $jobId)
+    {
+        static $ran = false;
+        if ($ran) {
+            return;
+        }
+        $ran = true;
+
+        try {
+            $last = error_get_last();
+            if (is_array($last) && self::isFatalPhpError(isset($last['type']) ? (int) $last['type'] : 0)) {
+                $msg = 'Snapshot worker terminated unexpectedly: type='
+                    . (int) $last['type']
+                    . ' '
+                    . (isset($last['message']) ? (string) $last['message'] : '')
+                    . ' @ '
+                    . (isset($last['file']) ? (string) $last['file'] : '')
+                    . ':'
+                    . (isset($last['line']) ? (string) $last['line'] : '');
+            } else {
+                $msg = 'Snapshot worker terminated unexpectedly without a PHP fatal error being reported.';
+            }
+            $msg = self::sanitizeErrorMessage($msg);
+
+            $affected = Capsule::table(self::TABLE)
+                ->where('id', $rowId)
+                ->where('status', self::STATUS_RUNNING)
+                ->update([
+                    'status'           => self::STATUS_FAILED,
+                    'schedule_slot'    => null,
+                    'error'            => $msg,
+                    'progress_percent' => 100,
+                    'progress_message' => $msg,
+                    'completed_at'     => date('Y-m-d H:i:s'),
+                ]);
+
+            if ((int) $affected !== 1) {
+                return;
+            }
+
+            try {
+                self::writeProgress($jobId, 100, $msg, 'error');
+            } catch (Throwable $e) {
+                // ignore
+            }
+            try {
+                Logger::error(
+                    'job.shutdown',
+                    'Worker shutdown while job still running: ' . $jobId,
+                    'cron'
+                );
+            } catch (Throwable $e) {
+                // ignore
+            }
+        } catch (Throwable $e) {
+            try {
+                error_log('SnapshotPro shutdown diagnostic failed');
+            } catch (Throwable $inner) {
+                // ignore
+            }
+        }
+    }
+
+    /**
+     * Whether a PHP error type is an uncaught fatal suitable for shutdown diagnosis.
+     *
+     * @param int $type
+     * @return bool
+     */
+    private static function isFatalPhpError($type)
+    {
+        $fatal = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR;
+        if (defined('E_RECOVERABLE_ERROR')) {
+            $fatal |= E_RECOVERABLE_ERROR;
+        }
+        return ((int) $type & $fatal) !== 0;
     }
 }
