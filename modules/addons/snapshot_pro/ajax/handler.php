@@ -129,15 +129,14 @@ try {
         // -------------------------------------------------------------------
         case 'progress':
             $jobId = isset($_REQUEST['job']) ? $_REQUEST['job'] : '';
-            $file  = sp_progressFile($jobId);
-            if (is_file($file)) {
-                $data = json_decode(file_get_contents($file), true);
-                sp_json(array_merge(['ok' => true], is_array($data) ? $data : []));
-            }
-            // Fall back to the persistent jobs table (e.g. after temp cleanup).
             $fromDb = JobQueue::progressFromDb($jobId);
             if ($fromDb) {
                 sp_json(array_merge(['ok' => true], $fromDb));
+            }
+            $file = sp_progressFile($jobId);
+            if (is_file($file)) {
+                $data = json_decode(file_get_contents($file), true);
+                sp_json(array_merge(['ok' => true], is_array($data) ? $data : []));
             }
             sp_json(['ok' => true, 'percent' => 0, 'message' => 'Waiting…', 'state' => 'running']);
             break;
