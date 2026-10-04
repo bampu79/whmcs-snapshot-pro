@@ -37,14 +37,15 @@ if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
 
 // modules/addons/snapshot_pro -> WHMCS root is three levels up.
 $whmcsRoot = dirname(__DIR__, 3);
-$initFile  = $whmcsRoot . '/init.php';
+$bootstrapFile = $whmcsRoot . '/crons/bootstrap.php';
 
-if (!is_file($initFile)) {
-    fwrite(STDERR, "Snapshot Pro worker: unable to locate WHMCS init.php at expected path.\n");
+if (!is_readable($bootstrapFile)) {
+    fwrite(STDERR, "Snapshot Pro worker: unable to locate WHMCS crons/bootstrap.php at expected path.\n");
     exit(1);
 }
 
-require_once $initFile;
+chdir($whmcsRoot);
+require_once $bootstrapFile;
 require_once __DIR__ . '/autoload.php';
 
 use SnapshotPro\JobQueue;
