@@ -7,9 +7,9 @@
  * retention pruning and listing/deletion of snapshots.
  *
  * A snapshot archive is a single encrypted file whose plaintext (before
- * encryption) is a tar containing:
+ * encryption) is an uncompressed tar containing:
  *   - database.sql.gz  (the compressed DB dump)
- *   - filesystem.tar.gz (the compressed WHMCS files)
+ *   - filesystem.zip or filesystem.tar.gz (WHMCS files)
  *   - manifest.json     (metadata about the snapshot)
  *
  * @package    SnapshotPro
@@ -20,7 +20,6 @@
 namespace SnapshotPro;
 
 use WHMCS\Database\Capsule;
-use PharData;
 use Exception;
 use RuntimeException;
 
@@ -234,7 +233,11 @@ class SnapshotManager
     }
 
     /**
-     * Bundle a directory of staged files into a single (uncompressed) tar.
+     * Bundle staged snapshot components into an uncompressed ustar archive.
+     *
+     * PharData is not used: adding filesystem.zip via PharData::addFile() makes
+     * PHP mount the zip as phar:// and fails with RecursiveDirectoryIterator
+     * "Unable to find the wrapper phar".
      *
      * @param string $stageDir  Directory containing the snapshot components.
      * @param string $outputTar Path to the tar file to create.
@@ -246,16 +249,21 @@ class SnapshotManager
     private function bundle($stageDir, $outputTar)
     {
         @unlink($outputTar);
-        try {
-            $phar = new PharData($outputTar);
-            foreach (glob($stageDir . '/*') as $file) {
-                if (is_file($file)) {
-                    $phar->addFile($file, basename($file));
-                }
+        $files = [];
+        $entries = glob($stageDir . DIRECTORY_SEPARATOR . '*') ?: [];
+        foreach ($entries as $file) {
+            if (is_file($file)) {
+                $files[] = $file;
             }
-            unset($phar);
+        }
+        if ($files === []) {
+            throw new RuntimeException('No snapshot components were staged for bundling.');
+        }
+        try {
+            self::writeUstarArchive($outputTar, $files);
         } catch (Exception $e) {
-            throw new RuntimeException('Failed to bundle snapshot: ' . $e->getMessage());
+            @unlink($outputTar);
+            throw new RuntimeException('Failed to bundle snapshot: ' . $e->getMessage(), 0, $e);
         }
     }
 
@@ -295,9 +303,13 @@ class SnapshotManager
             $this->cleanupStage($extractDir);
         }
         @mkdir($extractDir, 0700, true);
-        $phar = new PharData($bundleTar);
-        $phar->extractTo($extractDir, null, true);
-        unset($phar);
+        try {
+            self::extractUstarArchive($bundleTar, $extractDir);
+        } catch (Exception $e) {
+            @unlink($bundleTar);
+            $this->cleanupStage($extractDir);
+            throw new RuntimeException('Failed to extract snapshot bundle: ' . $e->getMessage(), 0, $e);
+        }
         @unlink($bundleTar);
 
         return $extractDir;
@@ -472,5 +484,198 @@ class SnapshotManager
     public function getWorkDir()
     {
         return $this->workDir;
+    }
+
+    /**
+     * Write an uncompressed ustar archive from a list of regular files.
+     *
+     * Member names are the basenames only. Used for the outer snapshot bundle
+     * (a handful of staged files), not a recursive tree walk.
+     *
+     * @param string   $outputTar
+     * @param string[] $files Absolute paths.
+     * @return void
+     */
+    private static function writeUstarArchive($outputTar, array $files)
+    {
+        $out = @fopen($outputTar, 'wb');
+        if ($out === false) {
+            throw new RuntimeException('Unable to create snapshot tar at ' . $outputTar);
+        }
+        try {
+            foreach ($files as $path) {
+                $name = basename($path);
+                if (!self::isSafeTarMemberName($name)) {
+                    throw new RuntimeException('Refusing to bundle snapshot member: ' . $name);
+                }
+                $size = filesize($path);
+                if ($size === false) {
+                    throw new RuntimeException('Unable to stat snapshot member: ' . $name);
+                }
+                $header = self::buildUstarHeader($name, (int) $size, (int) filemtime($path));
+                if (fwrite($out, $header) !== 512) {
+                    throw new RuntimeException('Failed to write tar header for ' . $name);
+                }
+                $in = @fopen($path, 'rb');
+                if ($in === false) {
+                    throw new RuntimeException('Unable to read snapshot member: ' . $name);
+                }
+                try {
+                    while (!feof($in)) {
+                        $chunk = fread($in, 8192);
+                        if ($chunk === false) {
+                            throw new RuntimeException('Read error bundling ' . $name);
+                        }
+                        if ($chunk !== '' && fwrite($out, $chunk) !== strlen($chunk)) {
+                            throw new RuntimeException('Write error bundling ' . $name);
+                        }
+                    }
+                } finally {
+                    fclose($in);
+                }
+                $pad = (512 - ((int) $size % 512)) % 512;
+                if ($pad > 0 && fwrite($out, str_repeat("\0", $pad)) !== $pad) {
+                    throw new RuntimeException('Failed to pad tar member ' . $name);
+                }
+            }
+            $eof = str_repeat("\0", 1024);
+            if (fwrite($out, $eof) !== 1024) {
+                throw new RuntimeException('Failed to finalize snapshot tar.');
+            }
+        } finally {
+            fclose($out);
+        }
+    }
+
+    /**
+     * Extract regular files from an uncompressed ustar archive.
+     *
+     * @param string $tarPath
+     * @param string $targetDir
+     * @return void
+     */
+    private static function extractUstarArchive($tarPath, $targetDir)
+    {
+        $in = @fopen($tarPath, 'rb');
+        if ($in === false) {
+            throw new RuntimeException('Unable to open snapshot tar for extraction.');
+        }
+        $extracted = 0;
+        try {
+            while (!feof($in)) {
+                $header = fread($in, 512);
+                if ($header === false || strlen($header) === 0) {
+                    break;
+                }
+                if (strlen($header) < 512) {
+                    throw new RuntimeException('Truncated snapshot tar header.');
+                }
+                if ($header === str_repeat("\0", 512)) {
+                    $next = fread($in, 512);
+                    break;
+                }
+                $name = rtrim(substr($header, 0, 100), "\0");
+                $prefix = rtrim(substr($header, 345, 155), "\0");
+                if ($prefix !== '') {
+                    $name = $prefix . '/' . $name;
+                }
+                $sizeOctal = rtrim(substr($header, 124, 12), "\0 ");
+                $size = octdec($sizeOctal);
+                $typeflag = $header[156];
+                if (!self::isSafeTarMemberName($name)) {
+                    throw new RuntimeException('Refusing to extract snapshot member: ' . $name);
+                }
+                $pad = (512 - ($size % 512)) % 512;
+                if ($typeflag !== '0' && $typeflag !== "\0") {
+                    if ($size + $pad > 0 && fseek($in, $size + $pad, SEEK_CUR) !== 0) {
+                        throw new RuntimeException('Unable to skip tar member ' . $name);
+                    }
+                    continue;
+                }
+                $dest = $targetDir . DIRECTORY_SEPARATOR . $name;
+                $out = @fopen($dest, 'wb');
+                if ($out === false) {
+                    throw new RuntimeException('Unable to write extracted member: ' . $name);
+                }
+                try {
+                    $remaining = $size;
+                    while ($remaining > 0) {
+                        $chunk = fread($in, (int) min(8192, $remaining));
+                        if ($chunk === false || $chunk === '') {
+                            throw new RuntimeException('Truncated snapshot tar member: ' . $name);
+                        }
+                        fwrite($out, $chunk);
+                        $remaining -= strlen($chunk);
+                    }
+                } finally {
+                    fclose($out);
+                }
+                if ($pad > 0 && fseek($in, $pad, SEEK_CUR) !== 0) {
+                    throw new RuntimeException('Unable to skip tar padding for ' . $name);
+                }
+                $extracted++;
+            }
+        } finally {
+            fclose($in);
+        }
+        if ($extracted < 1) {
+            throw new RuntimeException('Snapshot tar contained no extractable files.');
+        }
+    }
+
+    /**
+     * @param string $name
+     * @param int    $size
+     * @param int    $mtime
+     * @return string 512-byte ustar header
+     */
+    private static function buildUstarHeader($name, $size, $mtime)
+    {
+        $header = str_pad($name, 100, "\0");
+        $header .= sprintf('%07o', 0644) . "\0";
+        $header .= sprintf('%07o', 0) . "\0";
+        $header .= sprintf('%07o', 0) . "\0";
+        $header .= sprintf('%011o', $size) . "\0";
+        $header .= sprintf('%011o', $mtime) . "\0";
+        $header .= str_repeat(' ', 8);
+        $header .= '0';
+        $header .= str_repeat("\0", 100);
+        $header .= "ustar\0";
+        $header .= '00';
+        $header .= str_pad('snapshot', 32, "\0");
+        $header .= str_pad('snapshot', 32, "\0");
+        $header .= str_repeat("\0", 8);
+        $header .= str_repeat("\0", 8);
+        $header .= str_repeat("\0", 155);
+        $header .= str_repeat("\0", 12);
+        if (strlen($header) !== 512) {
+            throw new RuntimeException('Internal tar header length error.');
+        }
+        $sum = 0;
+        for ($i = 0; $i < 512; $i++) {
+            $sum += ord($header[$i]);
+        }
+        $checksum = sprintf('%06o', $sum) . "\0 ";
+        return substr($header, 0, 148) . $checksum . substr($header, 156);
+    }
+
+    /**
+     * Allow only a single-path-segment member name (no traversal).
+     *
+     * @param string $name
+     * @return bool
+     */
+    private static function isSafeTarMemberName($name)
+    {
+        if ($name === '' || $name === '.' || $name === '..') {
+            return false;
+        }
+        if (strpos($name, '/') !== false || strpos($name, '\\') !== false) {
+            return false;
+        }
+        if (strlen($name) > 100) {
+            return false;
+        }
+        return (bool) preg_match('/^[A-Za-z0-9._-]+$/', $name);
     }
 }
