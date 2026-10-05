@@ -24,6 +24,7 @@ use WHMCS\Database\Capsule;
 use SnapshotPro\SnapshotManager;
 use SnapshotPro\JobQueue;
 use SnapshotPro\RestoreWizard;
+use SnapshotPro\RestoreTarget;
 use SnapshotPro\Settings;
 use SnapshotPro\Logger;
 
@@ -80,6 +81,17 @@ function sp_progressFile($jobId)
 function sp_writeProgress($jobId, $percent, $message, $state = 'running', array $extra = [])
 {
     JobQueue::writeProgress($jobId, $percent, $message, $state, $extra);
+}
+
+/**
+ * Build a validated restore target from the current request.
+ *
+ * @return RestoreTarget
+ */
+function sp_restoreTargetFromRequest()
+{
+    $manager = new SnapshotManager();
+    return RestoreTarget::fromRequest($_REQUEST, $manager->getWhmcsRoot());
 }
 
 // ---------------------------------------------------------------------------
@@ -161,30 +173,17 @@ try {
             break;
 
         // -------------------------------------------------------------------
-        // Restore wizard: pre-restore safety backup.
+        // Restore wizard: pre-restore safety backup (queued for CLI worker).
         // -------------------------------------------------------------------
         case 'restore_safety':
-            $jobId = 'job_' . bin2hex(random_bytes(6));
-            sp_writeProgress($jobId, 1, 'Starting safety backup…');
-            @set_time_limit(0);
-            if (function_exists('fastcgi_finish_request')) {
-                echo json_encode(['ok' => true, 'job' => $jobId, 'async' => true]);
-                @session_write_close();
-                fastcgi_finish_request();
+            $target = sp_restoreTargetFromRequest();
+            $safety = RestoreWizard::safetyBackupFromRequest($_REQUEST, $target);
+            if (!$safety['create_safety_backup']) {
+                sp_json(['ok' => false, 'error' => 'Safety backup was not requested for this restore.'], 400);
             }
-            try {
-                $manager = new SnapshotManager();
-                $manager->create('pre-restore', $adminUser, function ($pct, $msg) use ($jobId) {
-                    sp_writeProgress($jobId, $pct, $msg);
-                });
-                sp_writeProgress($jobId, 100, 'Safety backup completed.', 'done');
-            } catch (\Exception $e) {
-                sp_writeProgress($jobId, 100, $e->getMessage(), 'error');
-            }
-            if (!function_exists('fastcgi_finish_request')) {
-                sp_json(['ok' => true, 'job' => $jobId, 'async' => false]);
-            }
-            exit;
+            $jobId = JobQueue::enqueue('pre-restore', $adminUser);
+            sp_json(['ok' => true, 'job' => $jobId, 'async' => true]);
+            break;
 
         // -------------------------------------------------------------------
         // Restore wizard: confirmation summary.
@@ -192,8 +191,10 @@ try {
         case 'restore_confirm':
             $snapshotId = preg_replace('/[^a-zA-Z0-9_]/', '', $_REQUEST['snapshot'] ?? '');
             $scope      = preg_replace('/[^a-z]/', '', $_REQUEST['scope'] ?? 'full');
+            $target     = sp_restoreTargetFromRequest();
+            $safety     = RestoreWizard::safetyBackupFromRequest($_REQUEST, $target);
             $wizard     = new RestoreWizard($adminUser);
-            sp_json(['ok' => true, 'summary' => $wizard->confirmationSummary($snapshotId, $scope)]);
+            sp_json(['ok' => true, 'summary' => $wizard->confirmationSummary($snapshotId, $scope, $target, $safety)]);
             break;
 
         // -------------------------------------------------------------------
@@ -202,6 +203,9 @@ try {
         case 'restore_execute':
             $snapshotId = preg_replace('/[^a-zA-Z0-9_]/', '', $_REQUEST['snapshot'] ?? '');
             $scope      = preg_replace('/[^a-z]/', '', $_REQUEST['scope'] ?? 'full');
+            $target     = sp_restoreTargetFromRequest();
+            $safety     = RestoreWizard::safetyBackupFromRequest($_REQUEST, $target);
+            RestoreWizard::assertSafetyBackupPolicy($target, $safety);
             $jobId      = 'job_' . bin2hex(random_bytes(6));
             sp_writeProgress($jobId, 1, 'Starting restore…');
             @set_time_limit(0);
@@ -213,7 +217,7 @@ try {
             try {
                 $encKey = (string) Settings::get('encryption_key', '');
                 $wizard = new RestoreWizard($adminUser);
-                $result = $wizard->execute($snapshotId, $scope, $encKey, function ($pct, $msg) use ($jobId) {
+                $result = $wizard->execute($snapshotId, $scope, $encKey, $target, function ($pct, $msg) use ($jobId) {
                     sp_writeProgress($jobId, $pct, $msg);
                 });
                 sp_writeProgress(

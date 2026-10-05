@@ -278,22 +278,47 @@ class DatabaseBackup
      * Prefers the mysql CLI client when available, otherwise executes the
      * statements through PDO in a transaction-friendly manner.
      *
-     * @param string $dumpPath Path to the .sql.gz file to restore.
+     * @param string     $dumpPath     Path to the .sql.gz file to restore.
+     * @param array|null $targetConfig Optional host/port/database/username/password for test restore.
      *
      * @return bool True on success.
      *
      * @throws RuntimeException On failure.
      */
-    public function restore($dumpPath)
+    public function restore($dumpPath, array $targetConfig = null)
     {
         if (!is_readable($dumpPath)) {
             throw new RuntimeException('Database dump not readable: ' . $dumpPath);
         }
 
-        if ($this->canUseMysqlClient()) {
-            return $this->restoreWithMysqlClient($dumpPath);
+        $useLiveConnection = $targetConfig === null;
+        $config = $this->resolveRestoreConfig($targetConfig);
+        if (!$useLiveConnection) {
+            RestoreTarget::assertTestDatabaseReady($config);
         }
-        return $this->restoreWithPhp($dumpPath);
+
+        if ($this->canUseMysqlClient()) {
+            return $this->restoreWithMysqlClient($dumpPath, $config);
+        }
+        return $this->restoreWithPhp($dumpPath, $config, $useLiveConnection);
+    }
+
+    /**
+     * @param array|null $targetConfig
+     * @return array
+     */
+    private function resolveRestoreConfig(array $targetConfig = null)
+    {
+        if ($targetConfig === null) {
+            return $this->dbConfig;
+        }
+        return [
+            'host'     => $targetConfig['host'],
+            'port'     => isset($targetConfig['port']) ? (int) $targetConfig['port'] : 3306,
+            'database' => $targetConfig['database'],
+            'username' => $targetConfig['username'],
+            'password' => $targetConfig['password'],
+        ];
     }
 
     /**
@@ -303,15 +328,55 @@ class DatabaseBackup
      */
     private function canUseMysqlClient()
     {
+        return $this->locateMysqlClient() !== null;
+    }
+
+    /**
+     * Locate the mysql client binary.
+     *
+     * @return string|null
+     */
+    private function locateMysqlClient()
+    {
         if (!function_exists('exec')) {
-            return false;
+            return null;
         }
         $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
         if (in_array('exec', $disabled, true)) {
-            return false;
+            return null;
         }
+
+        $candidates = [
+            '/usr/bin/mysql',
+            '/usr/local/bin/mysql',
+            '/usr/local/mysql/bin/mysql',
+            '/opt/cpanel/mysql/current/bin/mysql',
+        ];
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $wampRoots = [
+                'C:/wamp64/bin',
+                'D:/wamp64/bin',
+            ];
+            foreach ($wampRoots as $root) {
+                $matches = glob($root . '/mysql/mysql*/bin/mysql.exe');
+                if (is_array($matches)) {
+                    foreach ($matches as $path) {
+                        $candidates[] = $path;
+                    }
+                }
+            }
+        }
+        foreach ($candidates as $candidate) {
+            if (is_string($candidate) && $candidate !== '' && is_executable($candidate)) {
+                return $candidate;
+            }
+        }
+
         $which = @exec('command -v mysql 2>/dev/null');
-        return is_string($which) && $which !== '' && is_executable($which);
+        if (is_string($which) && $which !== '' && is_executable($which)) {
+            return $which;
+        }
+        return null;
     }
 
     /**
@@ -321,9 +386,12 @@ class DatabaseBackup
      * @return bool
      * @throws RuntimeException On failure.
      */
-    private function restoreWithMysqlClient($dumpPath)
+    private function restoreWithMysqlClient($dumpPath, array $config)
     {
-        $mysql = @exec('command -v mysql 2>/dev/null');
+        $mysql = $this->locateMysqlClient();
+        if ($mysql === null) {
+            throw new RuntimeException('mysql client binary not found.');
+        }
 
         // Decompress to a temporary raw SQL file first.
         $rawSql = $dumpPath . '.restore.sql';
@@ -331,16 +399,16 @@ class DatabaseBackup
 
         $defaultsFile = tempnam(sys_get_temp_dir(), 'sp_my_');
         $ini = "[client]\n"
-            . 'user=' . $this->dbConfig['username'] . "\n"
-            . 'password="' . str_replace('"', '\"', $this->dbConfig['password']) . "\"\n"
-            . 'host=' . $this->dbConfig['host'] . "\n"
-            . 'port=' . $this->dbConfig['port'] . "\n";
+            . 'user=' . $config['username'] . "\n"
+            . 'password="' . str_replace('"', '\"', $config['password']) . "\"\n"
+            . 'host=' . $config['host'] . "\n"
+            . 'port=' . $config['port'] . "\n";
         file_put_contents($defaultsFile, $ini);
         @chmod($defaultsFile, 0600);
 
         $cmd = escapeshellarg($mysql)
             . ' --defaults-extra-file=' . escapeshellarg($defaultsFile)
-            . ' ' . escapeshellarg($this->dbConfig['database'])
+            . ' ' . escapeshellarg($config['database'])
             . ' < ' . escapeshellarg($rawSql)
             . ' 2> ' . escapeshellarg($rawSql . '.err');
 
@@ -365,33 +433,35 @@ class DatabaseBackup
      * @return bool
      * @throws RuntimeException On failure.
      */
-    private function restoreWithPhp($dumpPath)
+    private function restoreWithPhp($dumpPath, array $config, $useLiveConnection = true)
     {
         $gz = gzopen($dumpPath, 'rb');
         if (!$gz) {
             throw new RuntimeException('Unable to open gzip dump for restore.');
         }
-        $pdo = Capsule::connection()->getPdo();
+        if ($useLiveConnection) {
+            $pdo = Capsule::connection()->getPdo();
+        } else {
+            $pdo = RestoreTarget::connectPdo($config, true);
+        }
 
         $buffer = '';
         try {
             while (!gzeof($gz)) {
-                $buffer .= gzread($gz, 262144);
-                // Execute complete statements terminated by ";\n".
-                while (($pos = strpos($buffer, ";\n")) !== false) {
-                    $statement = substr($buffer, 0, $pos + 1);
-                    $buffer    = substr($buffer, $pos + 2);
-                    $trimmed   = trim($statement);
-                    if ($trimmed === '' || strpos($trimmed, '--') === 0) {
+                $chunk = gzread($gz, 262144);
+                if ($chunk === false) {
+                    break;
+                }
+                $buffer .= $chunk;
+                foreach (self::extractCompleteSqlStatements($buffer) as $statement) {
+                    if (!self::sqlStatementHasExecutableSql($statement)) {
                         continue;
                     }
                     $pdo->exec($statement);
                 }
             }
-            // Any trailing statement without newline terminator.
-            $trailing = trim($buffer);
-            if ($trailing !== '' && strpos($trailing, '--') !== 0) {
-                $pdo->exec($trailing);
+            if (self::sqlStatementHasExecutableSql($buffer)) {
+                $pdo->exec(rtrim($buffer));
             }
         } catch (Exception $e) {
             gzclose($gz);
@@ -399,6 +469,271 @@ class DatabaseBackup
         }
         gzclose($gz);
         return true;
+    }
+
+    /**
+     * Pull zero or more complete SQL statements from the front of a buffer.
+     * The buffer is shortened to any trailing incomplete statement.
+     *
+     * @param string $buffer
+     *
+     * @return string[]
+     */
+    public static function extractCompleteSqlStatements(&$buffer)
+    {
+        $statements = [];
+        while (($pos = self::findSqlStatementTerminatorPos($buffer)) !== null) {
+            $statements[] = substr($buffer, 0, $pos + 1);
+            $buffer = substr($buffer, $pos + 1);
+        }
+        return $statements;
+    }
+
+    /**
+     * Parse a full SQL script into individual statements (for tests and tooling).
+     *
+     * @param string $sql
+     *
+     * @return string[]
+     */
+    public static function parseSqlStatements($sql)
+    {
+        $buffer = $sql;
+        $statements = self::extractCompleteSqlStatements($buffer);
+        if (self::sqlStatementHasExecutableSql($buffer)) {
+            $statements[] = rtrim($buffer);
+            $buffer = '';
+        }
+        return $statements;
+    }
+
+    /**
+     * Whether a statement chunk contains SQL beyond comments/whitespace.
+     *
+     * @param string $statement
+     *
+     * @return bool
+     */
+    public static function sqlStatementHasExecutableSql($statement)
+    {
+        $stripped = self::stripSqlComments($statement);
+        return trim($stripped) !== '';
+    }
+
+    /**
+     * @param string $sql
+     *
+     * @return string
+     */
+    public static function stripSqlComments($sql)
+    {
+        $len = strlen($sql);
+        $out = '';
+        $i   = 0;
+        $state = 'normal';
+        while ($i < $len) {
+            $c    = $sql[$i];
+            $next = ($i + 1 < $len) ? $sql[$i + 1] : '';
+
+            if ($state === 'line_comment') {
+                if ($c === "\n") {
+                    $state = 'normal';
+                    $out .= $c;
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'block_comment') {
+                if ($c === '*' && $next === '/') {
+                    $state = 'normal';
+                    $i += 2;
+                    continue;
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'single') {
+                $out .= $c;
+                if ($c === '\\' && $i + 1 < $len) {
+                    $out .= $sql[$i + 1];
+                    $i += 2;
+                    continue;
+                }
+                if ($c === "'") {
+                    if ($next === "'") {
+                        $out .= $next;
+                        $i += 2;
+                        continue;
+                    }
+                    $state = 'normal';
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'double') {
+                $out .= $c;
+                if ($c === '\\' && $i + 1 < $len) {
+                    $out .= $sql[$i + 1];
+                    $i += 2;
+                    continue;
+                }
+                if ($c === '"') {
+                    $state = 'normal';
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'backtick') {
+                $out .= $c;
+                if ($c === '`') {
+                    $state = 'normal';
+                }
+                $i++;
+                continue;
+            }
+
+            if ($c === '-' && $next === '-') {
+                $state = 'line_comment';
+                $i += 2;
+                continue;
+            }
+            if ($c === '#') {
+                $state = 'line_comment';
+                $i++;
+                continue;
+            }
+            if ($c === '/' && $next === '*') {
+                $state = 'block_comment';
+                $i += 2;
+                continue;
+            }
+            if ($c === "'") {
+                $state = 'single';
+                $out .= $c;
+                $i++;
+                continue;
+            }
+            if ($c === '"') {
+                $state = 'double';
+                $out .= $c;
+                $i++;
+                continue;
+            }
+            if ($c === '`') {
+                $state = 'backtick';
+                $out .= $c;
+                $i++;
+                continue;
+            }
+
+            $out .= $c;
+            $i++;
+        }
+        return $out;
+    }
+
+    /**
+     * Find the position of the next statement terminator (;) outside strings/comments.
+     *
+     * @param string $sql
+     *
+     * @return int|null
+     */
+    public static function findSqlStatementTerminatorPos($sql)
+    {
+        $len = strlen($sql);
+        $i   = 0;
+        $state = 'normal';
+        while ($i < $len) {
+            $c    = $sql[$i];
+            $next = ($i + 1 < $len) ? $sql[$i + 1] : '';
+
+            if ($state === 'line_comment') {
+                if ($c === "\n") {
+                    $state = 'normal';
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'block_comment') {
+                if ($c === '*' && $next === '/') {
+                    $state = 'normal';
+                    $i += 2;
+                    continue;
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'single') {
+                if ($c === '\\' && $i + 1 < $len) {
+                    $i += 2;
+                    continue;
+                }
+                if ($c === "'") {
+                    if ($next === "'") {
+                        $i += 2;
+                        continue;
+                    }
+                    $state = 'normal';
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'double') {
+                if ($c === '\\' && $i + 1 < $len) {
+                    $i += 2;
+                    continue;
+                }
+                if ($c === '"') {
+                    $state = 'normal';
+                }
+                $i++;
+                continue;
+            }
+            if ($state === 'backtick') {
+                if ($c === '`') {
+                    $state = 'normal';
+                }
+                $i++;
+                continue;
+            }
+
+            if ($c === '-' && $next === '-') {
+                $state = 'line_comment';
+                $i += 2;
+                continue;
+            }
+            if ($c === '#') {
+                $state = 'line_comment';
+                $i++;
+                continue;
+            }
+            if ($c === '/' && $next === '*') {
+                $state = 'block_comment';
+                $i += 2;
+                continue;
+            }
+            if ($c === "'") {
+                $state = 'single';
+                $i++;
+                continue;
+            }
+            if ($c === '"') {
+                $state = 'double';
+                $i++;
+                continue;
+            }
+            if ($c === '`') {
+                $state = 'backtick';
+                $i++;
+                continue;
+            }
+            if ($c === ';') {
+                return $i;
+            }
+            $i++;
+        }
+        return null;
     }
 
     /**

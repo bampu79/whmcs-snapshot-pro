@@ -114,16 +114,36 @@
         {* ---- Step 3: Safety backup ---- *}
         <div class="sp-panel" data-panel="safety" style="display:none;">
             <h4>Step 3 — Pre-restore Safety Backup</h4>
-            <p>A quick snapshot of the current state is taken so you can roll back if the restore fails.</p>
-            <div class="progress sp-progress">
-                <div id="sp-safety-bar" class="progress-bar progress-bar-striped progress-bar-animated"
-                     style="width:0%;">0%</div>
+            <label class="sp-check">
+                <input type="checkbox" id="sp-create-safety-backup" checked>
+                Create a safety backup before restoring
+            </label>
+            <p class="text-muted small" id="sp-safety-help">
+                A quick snapshot of the current state is taken so you can roll back if the restore fails.
+            </p>
+            <div id="sp-safety-run-block">
+                <div class="progress sp-progress">
+                    <div id="sp-safety-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                         style="width:0%;">0%</div>
+                </div>
+                <div id="sp-safety-msg" class="sp-progress-msg">Not started.</div>
+                <button type="button" class="btn btn-info sp-safety-run">Create Safety Backup</button>
             </div>
-            <div id="sp-safety-msg" class="sp-progress-msg">Not started.</div>
+            <div id="sp-safety-skip-production" class="alert alert-danger" style="display:none; margin-top:12px;">
+                <strong>Warning:</strong> You are proceeding without a pre-restore safety backup. If the restore fails
+                or produces unexpected results, Snapshot Pro will not have an automatically created rollback point.
+                <label class="sp-check" style="display:block; margin-top:10px;">
+                    <input type="checkbox" id="sp-skip-safety-ack">
+                    I understand that I am proceeding without a safety backup.
+                </label>
+            </div>
+            <div id="sp-safety-skip-test-info" class="alert alert-info" style="display:none; margin-top:12px;">
+                Safety backup is not required for Test/Clone Restore because the restore target is isolated from the
+                live WHMCS installation.
+            </div>
             <div class="sp-nav-buttons">
                 <button class="btn btn-secondary sp-back">Back</button>
-                <button class="btn btn-info sp-safety-run">Create Safety Backup</button>
-                <button class="btn btn-primary sp-next" disabled>Next: Choose Scope</button>
+                <button class="btn btn-primary sp-next" id="sp-safety-next" disabled>Next: Choose Scope</button>
             </div>
         </div>
 
@@ -143,16 +163,64 @@
             </div>
             <div class="sp-nav-buttons">
                 <button class="btn btn-secondary sp-back">Back</button>
-                <button class="btn btn-primary sp-next">Next: Confirm</button>
+                <button class="btn btn-primary sp-next">Next: Restore Mode</button>
             </div>
         </div>
 
-        {* ---- Step 5: Confirm ---- *}
+        {* ---- Step 5: Restore mode ---- *}
+        <div class="sp-panel" data-panel="mode" style="display:none;">
+            <h4>Step 5 — Restore Mode</h4>
+            <div class="sp-scope-options">
+                <label class="sp-radio">
+                    <input type="radio" name="sp_restore_mode" value="production" checked>
+                    Restore to Current WHMCS
+                    <div class="text-danger small">WARNING: This will overwrite the current database and files.</div>
+                </label>
+                <label class="sp-radio">
+                    <input type="radio" name="sp_restore_mode" value="test">
+                    Restore to Test Location
+                    <div class="text-muted small">Creates an isolated copy for verification. Production is not modified.</div>
+                </label>
+            </div>
+            <div id="sp-test-restore-fields" class="sp-test-restore-fields" style="display:none; margin-top:16px;">
+                <div class="form-group">
+                    <label for="sp-test-filesystem">Filesystem destination</label>
+                    <input type="text" class="form-control" id="sp-test-filesystem" placeholder="D:\path\to\hostila-restore-test">
+                </div>
+                <div class="form-group">
+                    <label for="sp-test-db-name">Database name</label>
+                    <input type="text" class="form-control" id="sp-test-db-name" placeholder="hostila_restore_test">
+                </div>
+                <div class="form-group">
+                    <label for="sp-test-db-host">Database host</label>
+                    <input type="text" class="form-control" id="sp-test-db-host" placeholder="localhost">
+                </div>
+                <div class="form-group">
+                    <label for="sp-test-db-user">Database username</label>
+                    <input type="text" class="form-control" id="sp-test-db-user">
+                </div>
+                <div class="form-group">
+                    <label for="sp-test-db-password">Database password</label>
+                    <input type="password" class="form-control" id="sp-test-db-password" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label for="sp-test-base-url">Test base URL</label>
+                    <input type="url" class="form-control" id="sp-test-base-url" placeholder="http://hostila-test.local/">
+                </div>
+            </div>
+            <div class="sp-nav-buttons">
+                <button class="btn btn-secondary sp-back">Back</button>
+                <button class="btn btn-primary sp-next" id="sp-mode-next">Next: Confirmation</button>
+            </div>
+        </div>
+
+        {* ---- Step 6: Confirm ---- *}
         <div class="sp-panel" data-panel="confirm" style="display:none;">
-            <h4>Step 5 — Confirmation</h4>
+            <h4>Step 6 — Confirmation</h4>
             <div id="sp-confirm-summary" class="sp-status-box">Loading summary…</div>
             <label class="sp-check">
-                <input type="checkbox" id="sp-confirm-check"> I understand this will overwrite current data.
+                <input type="checkbox" id="sp-confirm-check">
+                <span id="sp-confirm-check-label">I understand this will overwrite current data.</span>
             </label>
             <div class="sp-nav-buttons">
                 <button class="btn btn-secondary sp-back">Back</button>
@@ -160,9 +228,9 @@
             </div>
         </div>
 
-        {* ---- Step 6: Execute ---- *}
+        {* ---- Step 7: Execute ---- *}
         <div class="sp-panel" data-panel="execute" style="display:none;">
-            <h4>Step 6 — Restoring</h4>
+            <h4>Step 7 — Restoring</h4>
             <div class="progress sp-progress">
                 <div id="sp-restore-bar" class="progress-bar progress-bar-striped progress-bar-animated"
                      style="width:0%;">0%</div>
@@ -171,9 +239,9 @@
             <div id="sp-restore-log" class="sp-progress-log"></div>
         </div>
 
-        {* ---- Step 7: Report ---- *}
+        {* ---- Step 8: Report ---- *}
         <div class="sp-panel" data-panel="report" style="display:none;">
-            <h4>Step 7 — Restore Report</h4>
+            <h4>Step 8 — Restore Report</h4>
             <div id="sp-report" class="sp-status-box"></div>
             <div class="sp-nav-buttons">
                 <a href="{$modulelink}&spaction=dashboard" class="btn btn-primary">Back to Dashboard</a>

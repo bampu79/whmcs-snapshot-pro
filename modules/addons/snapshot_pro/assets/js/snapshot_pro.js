@@ -165,9 +165,153 @@ window.SnapshotPro = (function () {
 
         var steps = Array.prototype.slice.call(root.querySelectorAll('.sp-step'));
         var panels = Array.prototype.slice.call(root.querySelectorAll('.sp-panel'));
-        var order = ['select', 'verify', 'safety', 'scope', 'confirm', 'execute', 'report'];
+        var order = ['select', 'verify', 'safety', 'scope', 'mode', 'confirm', 'execute', 'report'];
         var current = 0;
-        var state = { snapshot: null, scope: 'full', verified: false, safety: false };
+        var state = {
+            snapshot: null,
+            scope: 'full',
+            restoreMode: 'production',
+            verified: false,
+            safetyJobDone: false,
+            createSafetyBackup: true,
+            skipSafetyAck: false,
+            safetyChoiceExplicit: false
+        };
+
+        function captureRestoreMode() {
+            var sel = root.querySelector('input[name="sp_restore_mode"]:checked');
+            state.restoreMode = sel ? sel.value : 'production';
+        }
+
+        function restoreRequestParams() {
+            captureRestoreMode();
+            syncCreateSafetyFromCheckbox();
+            var params = {
+                snapshot: state.snapshot,
+                scope: state.scope,
+                restore_mode: state.restoreMode || 'production',
+                create_safety_backup: state.createSafetyBackup ? '1' : '0',
+                skip_safety_backup_ack: state.skipSafetyAck ? '1' : '0'
+            };
+            if (state.restoreMode === 'test') {
+                params.test_filesystem_path = (document.getElementById('sp-test-filesystem') || {}).value || '';
+                params.test_db_name = (document.getElementById('sp-test-db-name') || {}).value || '';
+                params.test_db_host = (document.getElementById('sp-test-db-host') || {}).value || '';
+                params.test_db_user = (document.getElementById('sp-test-db-user') || {}).value || '';
+                params.test_db_password = (document.getElementById('sp-test-db-password') || {}).value || '';
+                params.test_base_url = (document.getElementById('sp-test-base-url') || {}).value || '';
+            }
+            return params;
+        }
+
+        function testRestoreFieldsValid() {
+            if (state.restoreMode !== 'test') {
+                return true;
+            }
+            var fields = [
+                'sp-test-filesystem',
+                'sp-test-db-name',
+                'sp-test-db-host',
+                'sp-test-db-user',
+                'sp-test-db-password',
+                'sp-test-base-url'
+            ];
+            return fields.every(function (id) {
+                var el = document.getElementById(id);
+                return el && String(el.value || '').trim() !== '';
+            });
+        }
+
+        function toggleTestRestoreFields() {
+            captureRestoreMode();
+            var box = document.getElementById('sp-test-restore-fields');
+            var label = document.getElementById('sp-confirm-check-label');
+            if (!box) { return; }
+            box.style.display = (state.restoreMode === 'test') ? 'block' : 'none';
+            if (label) {
+                label.textContent = (state.restoreMode === 'test')
+                    ? 'I understand this will create an isolated test clone only.'
+                    : 'I understand this will overwrite current data.';
+            }
+            if (!state.safetyChoiceExplicit) {
+                state.createSafetyBackup = (state.restoreMode !== 'test');
+                var createCb = document.getElementById('sp-create-safety-backup');
+                if (createCb) {
+                    createCb.checked = state.createSafetyBackup;
+                }
+            }
+            updateSafetyStepUi();
+        }
+
+        function syncCreateSafetyFromCheckbox() {
+            var createCb = document.getElementById('sp-create-safety-backup');
+            if (createCb) {
+                state.createSafetyBackup = !!createCb.checked;
+            }
+            var ackCb = document.getElementById('sp-skip-safety-ack');
+            if (ackCb) {
+                state.skipSafetyAck = !!ackCb.checked;
+            }
+        }
+
+        function canLeaveSafetyStep() {
+            syncCreateSafetyFromCheckbox();
+            captureRestoreMode();
+            if (state.createSafetyBackup) {
+                return state.safetyJobDone;
+            }
+            if (state.restoreMode === 'test') {
+                return true;
+            }
+            return state.skipSafetyAck;
+        }
+
+        function updateSafetyStepUi() {
+            syncCreateSafetyFromCheckbox();
+            captureRestoreMode();
+            var runBlock = document.getElementById('sp-safety-run-block');
+            var prodWarn = document.getElementById('sp-safety-skip-production');
+            var testInfo = document.getElementById('sp-safety-skip-test-info');
+            var safetyNext = document.getElementById('sp-safety-next');
+            var safetyRun = root.querySelector('.sp-safety-run');
+            if (runBlock) {
+                runBlock.style.display = state.createSafetyBackup ? 'block' : 'none';
+            }
+            if (prodWarn) {
+                prodWarn.style.display = (!state.createSafetyBackup && state.restoreMode !== 'test') ? 'block' : 'none';
+            }
+            if (testInfo) {
+                testInfo.style.display = (!state.createSafetyBackup && state.restoreMode === 'test') ? 'block' : 'none';
+            }
+            if (safetyNext) {
+                safetyNext.disabled = !canLeaveSafetyStep();
+            }
+            if (safetyRun) {
+                safetyRun.style.display = state.createSafetyBackup ? '' : 'none';
+            }
+        }
+
+        root.querySelectorAll('input[name="sp_restore_mode"]').forEach(function (radio) {
+            radio.addEventListener('change', toggleTestRestoreFields);
+        });
+        toggleTestRestoreFields();
+
+        var createSafetyCb = document.getElementById('sp-create-safety-backup');
+        if (createSafetyCb) {
+            createSafetyCb.addEventListener('change', function () {
+                state.safetyChoiceExplicit = true;
+                if (!createSafetyCb.checked) {
+                    state.safetyJobDone = false;
+                }
+                updateSafetyStepUi();
+            });
+        }
+        var skipSafetyAckCb = document.getElementById('sp-skip-safety-ack');
+        if (skipSafetyAckCb) {
+            skipSafetyAckCb.addEventListener('change', function () {
+                updateSafetyStepUi();
+            });
+        }
 
         function show(index) {
             current = index;
@@ -179,6 +323,9 @@ window.SnapshotPro = (function () {
                 if (i < index) { s.classList.add('sp-step-done'); }
                 else if (i === index) { s.classList.add('sp-step-active'); }
             });
+            if (order[index] === 'safety') {
+                updateSafetyStepUi();
+            }
         }
 
         // Step 1: snapshot selection enables Next.
@@ -211,10 +358,25 @@ window.SnapshotPro = (function () {
         // Generic Next buttons (used by select & scope panels).
         root.querySelectorAll('.sp-next').forEach(function (b) {
             b.addEventListener('click', function () {
+                if (order[current] === 'safety' && !canLeaveSafetyStep()) {
+                    if (!state.createSafetyBackup && state.restoreMode !== 'test' && !state.skipSafetyAck) {
+                        alert('Please acknowledge proceeding without a safety backup.');
+                    } else if (state.createSafetyBackup && !state.safetyJobDone) {
+                        alert('Please complete the safety backup or disable it with the required acknowledgment.');
+                    }
+                    return;
+                }
                 // Capture scope when leaving the scope panel.
                 if (order[current] === 'scope') {
                     var sel = root.querySelector('input[name="sp_scope"]:checked');
                     state.scope = sel ? sel.value : 'full';
+                }
+                if (order[current] === 'mode') {
+                    captureRestoreMode();
+                    if (!testRestoreFieldsValid()) {
+                        alert('Please complete all test restore fields before continuing.');
+                        return;
+                    }
                     loadConfirmSummary();
                 }
                 if (current < order.length - 1) { show(current + 1); }
@@ -245,10 +407,13 @@ window.SnapshotPro = (function () {
         var safetyRun = root.querySelector('.sp-safety-run');
         if (safetyRun) {
             safetyRun.addEventListener('click', function () {
+                if (!state.createSafetyBackup) {
+                    return;
+                }
                 var bar = document.getElementById('sp-safety-bar');
                 var msg = document.getElementById('sp-safety-msg');
                 safetyRun.disabled = true;
-                post('restore_safety', {}, csrf).then(function (resp) {
+                post('restore_safety', restoreRequestParams(), csrf).then(function (resp) {
                     if (!resp.ok || !resp.job) { msg.textContent = resp.error || 'Failed to start.'; safetyRun.disabled = false; return; }
                     pollProgress(resp.job, function (d) {
                         setBar(bar, d.percent);
@@ -256,9 +421,8 @@ window.SnapshotPro = (function () {
                     }, function (d) {
                         if (d.state === 'done') {
                             msg.textContent = 'Safety backup complete.';
-                            var next = panels[2].querySelector('.sp-next');
-                            if (next) { next.disabled = false; }
-                            state.safety = true;
+                            state.safetyJobDone = true;
+                            updateSafetyStepUi();
                         } else {
                             msg.textContent = 'Safety backup failed: ' + (d.message || '');
                             safetyRun.disabled = false;
@@ -273,11 +437,30 @@ window.SnapshotPro = (function () {
             var box = document.getElementById('sp-confirm-summary');
             if (!box) { return; }
             box.textContent = 'Loading summary…';
-            post('restore_confirm', { snapshot: state.snapshot, scope: state.scope }, csrf).then(function (r) {
+            post('restore_confirm', restoreRequestParams(), csrf).then(function (r) {
                 if (r.ok && r.summary) {
                     var html = '<strong>Snapshot:</strong> ' + r.summary.snapshot_id + '<br>'
                         + '<strong>Created:</strong> ' + r.summary.created_at + '<br>'
-                        + '<strong>Scope:</strong> ' + r.summary.scope + '<hr>';
+                        + '<strong>Scope:</strong> ' + r.summary.scope + '<br>'
+                        + '<strong>Mode:</strong> ' + (r.summary.restore_mode || 'production') + '<hr>'
+                        + '<strong>TARGET:</strong> ' + (r.summary.headline || 'Current WHMCS') + '<br>';
+                    if (r.summary.filesystem_target) {
+                        html += '<strong>Filesystem:</strong> ' + r.summary.filesystem_target + '<br>';
+                    }
+                    if (r.summary.database_target) {
+                        html += '<strong>Database:</strong> ' + r.summary.database_target + '<br>';
+                    }
+                    if (r.summary.test_url) {
+                        html += '<strong>URL:</strong> ' + r.summary.test_url + '<br>';
+                    }
+                    if (r.summary.safety_backup && r.summary.safety_backup.label) {
+                        var safetyClass = (r.summary.safety_backup.status === 'skipped') ? 'text-danger' : '';
+                        html += '<div class="' + safetyClass + '"><strong>' + r.summary.safety_backup.label + '</strong></div>';
+                    }
+                    html += '<hr>';
+                    (r.summary.warnings || []).forEach(function (w) {
+                        html += '<div class="text-danger"><strong>WARNING:</strong> ' + w + '</div>';
+                    });
                     (r.summary.targets || []).forEach(function (t) {
                         html += '<div>• ' + t.detail + '</div>';
                     });
@@ -305,7 +488,11 @@ window.SnapshotPro = (function () {
                 var bar = document.getElementById('sp-restore-bar');
                 var msg = document.getElementById('sp-restore-msg');
                 var log = document.getElementById('sp-restore-log');
-                post('restore_execute', { snapshot: state.snapshot, scope: state.scope }, csrf).then(function (resp) {
+                if (!testRestoreFieldsValid()) {
+                    msg.textContent = 'Test restore fields are incomplete.';
+                    return;
+                }
+                post('restore_execute', restoreRequestParams(), csrf).then(function (resp) {
                     if (!resp.ok || !resp.job) { msg.textContent = resp.error || 'Failed to start restore.'; return; }
                     pollProgress(resp.job, function (d) {
                         setBar(bar, d.percent);
@@ -327,8 +514,9 @@ window.SnapshotPro = (function () {
             var box = document.getElementById('sp-report');
             if (!box) { return; }
             var ok = d.state === 'done';
+            var successText = d.message || (ok ? 'Restore completed successfully.' : 'Restore failed.');
             var html = '<div class="alert alert-' + (ok ? 'success' : 'danger') + '">'
-                + (ok ? '✔ Restore completed successfully.' : '✖ ' + (d.message || 'Restore failed.'))
+                + (ok ? '✔ ' : '✖ ') + successText
                 + '</div>';
             if (d.verification) {
                 Object.keys(d.verification).forEach(function (k) {

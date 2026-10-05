@@ -368,11 +368,11 @@ class FilesystemBackup
             if ($zip->open($archivePath) !== true) {
                 throw new RuntimeException('Unable to open ZIP archive for extraction.');
             }
-            if (!$zip->extractTo($targetDir)) {
+            try {
+                $this->extractZipSafely($zip, $targetDir);
+            } finally {
                 $zip->close();
-                throw new RuntimeException('ZIP extraction failed.');
             }
-            $zip->close();
             return true;
         }
 
@@ -393,5 +393,339 @@ class FilesystemBackup
     public function getExcludes()
     {
         return $this->excludes;
+    }
+
+    /**
+     * Runtime directories WHMCS expects but backups intentionally omit.
+     *
+     * @return string[]
+     */
+    public static function requiredRuntimeDirectories()
+    {
+        return [
+            'templates_c',
+            'cache',
+            'temp',
+            'attachments/tmp',
+        ];
+    }
+
+    /**
+     * @param string $relative Forward-slash relative path.
+     *
+     * @return bool
+     */
+    public static function isExcludedRelativePath($relative)
+    {
+        $backup = new self(DIRECTORY_SEPARATOR . 'whmcs');
+        return $backup->isExcluded(str_replace('\\', '/', $relative));
+    }
+
+    /**
+     * Create empty runtime directories required for a usable WHMCS install.
+     *
+     * @param string $targetRoot Absolute WHMCS root.
+     *
+     * @return array{ok:bool,prepared:string[],details:array<string,array{path:string,writable:bool}>}
+     */
+    public static function prepareRuntimeDirectories($targetRoot)
+    {
+        $details = [];
+        $prepared = [];
+        $allOk = true;
+        foreach (self::requiredRuntimeDirectories() as $relative) {
+            $path = rtrim($targetRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR
+                . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+            $writable = RestoreTarget::ensureWritableDirectory($path);
+            $details[$relative] = [
+                'path'     => $path,
+                'writable' => $writable,
+            ];
+            if ($writable) {
+                $prepared[] = $relative;
+            } else {
+                $allOk = false;
+            }
+        }
+        return [
+            'ok'       => $allOk,
+            'prepared' => $prepared,
+            'details'  => $details,
+        ];
+    }
+
+    /**
+     * List regular-file members in a filesystem archive.
+     *
+     * @param string $archivePath
+     *
+     * @return array<int,array{path:string,size:int,crc?:int}>
+     */
+    public function listArchiveFileMembers($archivePath)
+    {
+        if (preg_match('/\.zip$/i', $archivePath)) {
+            return $this->listZipFileMembers($archivePath);
+        }
+        return $this->listPharFileMembers($archivePath);
+    }
+
+    /**
+     * @param string $archivePath
+     * @param string $targetDir
+     * @param string[] $relativePaths
+     *
+     * @return void
+     */
+    public function extractArchiveMembers($archivePath, $targetDir, array $relativePaths)
+    {
+        $relativePaths = array_values(array_unique(array_filter($relativePaths)));
+        if ($relativePaths === []) {
+            return;
+        }
+        if (preg_match('/\.zip$/i', $archivePath)) {
+            $this->extractZipMembers($archivePath, $targetDir, $relativePaths);
+            return;
+        }
+        $this->extractPharMembers($archivePath, $targetDir, $relativePaths);
+    }
+
+    /**
+     * Verify extracted files against archive metadata; retry recoverable misses once.
+     *
+     * @param string $archivePath
+     * @param string $targetDir
+     *
+     * @return array{
+     *   ok:bool,
+     *   expected_count:int,
+     *   missing:string[],
+     *   size_mismatch:string[],
+     *   retried:string[],
+     *   still_missing:string[],
+     *   still_mismatch:string[]
+     * }
+     */
+    public function verifyAndRepairExtractedArchive($archivePath, $targetDir)
+    {
+        $members = $this->listArchiveFileMembers($archivePath);
+        $rootReal = RestoreTarget::canonicalPath($targetDir, true);
+        $check = $this->compareMembersToDisk($members, $rootReal);
+        $retried = [];
+        $toRetry = array_values(array_unique(array_merge($check['missing'], $check['size_mismatch'])));
+        if ($toRetry !== []) {
+            $this->extractArchiveMembers($archivePath, $targetDir, $toRetry);
+            $retried = $toRetry;
+            $check = $this->compareMembersToDisk($members, $rootReal);
+        }
+        $ok = $check['missing'] === [] && $check['size_mismatch'] === [];
+        return [
+            'ok'              => $ok,
+            'expected_count'  => count($members),
+            'missing'         => $check['missing'],
+            'size_mismatch'   => $check['size_mismatch'],
+            'retried'         => $retried,
+            'still_missing'   => $check['missing'],
+            'still_mismatch'  => $check['size_mismatch'],
+        ];
+    }
+
+    /**
+     * @param array<int,array{path:string,size:int}> $members
+     * @param string $rootReal
+     *
+     * @return array{missing:string[],size_mismatch:string[]}
+     */
+    private function compareMembersToDisk(array $members, $rootReal)
+    {
+        $missing = [];
+        $sizeMismatch = [];
+        foreach ($members as $member) {
+            $relative = $member['path'];
+            $dest = $rootReal . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+            if (!is_file($dest)) {
+                $missing[] = $relative;
+                continue;
+            }
+            if ((int) filesize($dest) !== (int) $member['size']) {
+                $sizeMismatch[] = $relative;
+            }
+        }
+        return [
+            'missing'       => $missing,
+            'size_mismatch' => $sizeMismatch,
+        ];
+    }
+
+    /**
+     * @param string $archivePath
+     *
+     * @return array<int,array{path:string,size:int,crc?:int}>
+     */
+    private function listZipFileMembers($archivePath)
+    {
+        $zip = new ZipArchive();
+        if ($zip->open($archivePath) !== true) {
+            throw new RuntimeException('Unable to open ZIP archive for verification.');
+        }
+        $members = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entryName = $zip->getNameIndex($i);
+            if ($entryName === false || $entryName === '') {
+                continue;
+            }
+            if (substr(str_replace('\\', '/', $entryName), -1) === '/') {
+                continue;
+            }
+            $relative = RestoreTarget::validateZipEntryName($entryName);
+            $stat = $zip->statIndex($i);
+            $members[] = [
+                'path' => $relative,
+                'size' => isset($stat['size']) ? (int) $stat['size'] : 0,
+                'crc'  => isset($stat['crc']) ? (int) $stat['crc'] : null,
+            ];
+        }
+        $zip->close();
+        return $members;
+    }
+
+    /**
+     * @param string $archivePath
+     *
+     * @return array<int,array{path:string,size:int}>
+     */
+    private function listPharFileMembers($archivePath)
+    {
+        $phar = new PharData($archivePath);
+        $members = [];
+        foreach (new \RecursiveIteratorIterator($phar, \RecursiveIteratorIterator::LEAVES_ONLY) as $file) {
+            if ($file->isDir()) {
+                continue;
+            }
+            $relative = str_replace('\\', '/', substr($file->getPathname(), strlen($phar->getPath()) + 1));
+            $relative = ltrim($relative, '/');
+            if ($relative === '') {
+                continue;
+            }
+            $members[] = [
+                'path' => $relative,
+                'size' => (int) $file->getSize(),
+            ];
+        }
+        return $members;
+    }
+
+    /**
+     * @param string $archivePath
+     * @param string $targetDir
+     * @param string[] $relativePaths
+     *
+     * @return void
+     */
+    private function extractZipMembers($archivePath, $targetDir, array $relativePaths)
+    {
+        $wanted = array_flip($relativePaths);
+        $zip = new ZipArchive();
+        if ($zip->open($archivePath) !== true) {
+            throw new RuntimeException('Unable to open ZIP archive for member retry.');
+        }
+        $rootReal = RestoreTarget::canonicalPath($targetDir, true);
+        try {
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $entryName = $zip->getNameIndex($i);
+                if ($entryName === false || $entryName === '') {
+                    continue;
+                }
+                if (substr(str_replace('\\', '/', $entryName), -1) === '/') {
+                    continue;
+                }
+                $relative = RestoreTarget::validateZipEntryName($entryName);
+                if (!isset($wanted[$relative])) {
+                    continue;
+                }
+                $destPath = RestoreTarget::resolveZipEntryPath($entryName, $rootReal);
+                $parent = dirname($destPath);
+                if (!is_dir($parent) && !@mkdir($parent, 0755, true)) {
+                    throw new RuntimeException('Unable to create parent directory for retry: ' . $relative);
+                }
+                $contents = $zip->getFromIndex($i);
+                if ($contents === false) {
+                    throw new RuntimeException('Unable to read ZIP entry for retry: ' . $relative);
+                }
+                if (file_put_contents($destPath, $contents) === false) {
+                    throw new RuntimeException('Unable to write ZIP entry for retry: ' . $relative);
+                }
+                RestoreTarget::assertMaterializedPathInsideRoot($destPath, $rootReal);
+            }
+        } finally {
+            $zip->close();
+        }
+    }
+
+    /**
+     * @param string $archivePath
+     * @param string $targetDir
+     * @param string[] $relativePaths
+     *
+     * @return void
+     */
+    private function extractPharMembers($archivePath, $targetDir, array $relativePaths)
+    {
+        $phar = new PharData($archivePath);
+        $rootReal = RestoreTarget::canonicalPath($targetDir, true);
+        foreach ($relativePaths as $relative) {
+            $relative = str_replace('\\', '/', $relative);
+            $contents = file_get_contents('phar://' . $archivePath . '/' . $relative);
+            if ($contents === false) {
+                throw new RuntimeException('Unable to read archive member for retry: ' . $relative);
+            }
+            $destPath = $rootReal . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+            $parent = dirname($destPath);
+            if (!is_dir($parent) && !@mkdir($parent, 0755, true)) {
+                throw new RuntimeException('Unable to create parent directory for retry: ' . $relative);
+            }
+            if (file_put_contents($destPath, $contents) === false) {
+                throw new RuntimeException('Unable to write archive member for retry: ' . $relative);
+            }
+        }
+    }
+
+    /**
+     * Extract ZIP members one-by-one with zip-slip validation.
+     *
+     * @param ZipArchive $zip
+     * @param string     $targetDir
+     * @return void
+     */
+    private function extractZipSafely(ZipArchive $zip, $targetDir)
+    {
+        $rootReal = RestoreTarget::canonicalPath($targetDir, true);
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entryName = $zip->getNameIndex($i);
+            if ($entryName === false || $entryName === '') {
+                continue;
+            }
+            $isDir = substr(str_replace('\\', '/', $entryName), -1) === '/';
+            $relative = RestoreTarget::validateZipEntryName($entryName);
+            $destPath = RestoreTarget::resolveZipEntryPath($entryName, $rootReal);
+            if ($isDir) {
+                if (!is_dir($destPath) && !@mkdir($destPath, 0755, true)) {
+                    throw new RuntimeException('Unable to create ZIP directory: ' . $relative);
+                }
+                RestoreTarget::assertMaterializedPathInsideRoot($destPath, $rootReal);
+                continue;
+            }
+            $parent = dirname($destPath);
+            if (!is_dir($parent) && !@mkdir($parent, 0755, true)) {
+                throw new RuntimeException('Unable to create ZIP parent directory for: ' . $relative);
+            }
+            $contents = $zip->getFromIndex($i);
+            if ($contents === false) {
+                throw new RuntimeException('Unable to read ZIP entry: ' . $relative);
+            }
+            if (file_put_contents($destPath, $contents) === false) {
+                throw new RuntimeException('Unable to write ZIP entry: ' . $relative);
+            }
+            RestoreTarget::assertMaterializedPathInsideRoot($destPath, $rootReal);
+        }
     }
 }
